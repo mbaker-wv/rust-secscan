@@ -1,12 +1,9 @@
 use std::env; // Access to command-line arguments and environment info
 use std::fs;  // Access to filesystem functions (read files)
+use std::collections::HashSet;
 use sha2::{Digest,Sha256};
 use sha1::Sha1;
 use md5::Md5;
-
-const BAD_MD5: &str = "5d41402abc4b2a76b9719d911017c592";
-const BAD_SHA1: &str = "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d";
-const BAD_SHA256: &str = "3615f80c9d293ed7402687f94b22d58e529b8cc7916f8fac7fddf7fbd5af4cf0";
 
 fn main() {
     // I collect all command-line arguments into a vector (list)
@@ -32,6 +29,32 @@ fn main() {
         return;
     }
 
+    // Load IOC File
+    let ioc_contents = match fs::read_to_string("iocs.txt") {
+        Ok(data) => data,
+        Err(err) => { 
+            println!("Failed to load IOC file: {}", err);
+            return
+        }
+    };
+
+    // Store IOCs in sets for fast lookup
+    let mut md5_iocs = HashSet::new();
+    let mut sha1_iocs = HashSet::new();
+    let mut sha256_iocs = HashSet::new();
+
+    // Parse IOC lines
+    for line in ioc_contents.lines() {
+        if let Some((hash_type, value)) = line.split_once(':') {
+            match hash_type {
+                "md5" => { md5_iocs.insert(value.to_string()); }
+                "sha1" => { sha1_iocs.insert(value.to_string()); }
+                "sha256" => { sha256_iocs.insert(value.to_string());}
+                _=> {} 
+            }
+        }
+    }
+
     // I attempt to read the file as RAW BYTES
     // Ok(Vec<u8>)  -> file read successfully
     // Err(error)   -> something went wrong
@@ -48,7 +71,7 @@ fn main() {
             println!("File size: {} bytes", bytes.len());
 
             // --- MD5 ---
-            // I create a SHA-256 hasher
+            // I create a MD5 hasher
             let mut md5_hasher = Md5::new();
             
             // I then feed raw bytes into the hasher
@@ -81,32 +104,27 @@ fn main() {
             println!();
             println!("IOC Comparison");
 
-            // sets the 'matched' var to false by default and marks it that it may change
-            let mut matched = false;
+            let mut matches = 0;
 
-            // start of the 'if' statements that check the known bad hashs to the hex of the file.
-            if md5_hex == BAD_MD5 {
+            if md5_iocs.contains(&md5_hex) {
                 println!("MD5 MATCH");
-                matched = true;
+                matches +=1;
             }
 
-            if sha1_hex == BAD_SHA1 {
+            if sha1_iocs.contains(&sha1_hex) {
                 println!("SHA1 MATCH");
-                matched = true;
-            }
-            
-            if sha256_hex == BAD_SHA256 {
-                println!("SHA256 MATCH");
-                matched = true;
+                matches +=1;
             }
 
-            if matched {
-                println!("VERDICT: MATCHED (known bad file)");
-            }   
-            
-            // if no hashes match then print no match
-            else {
-                println!("VERDICT: NO MATCH");
+            if sha256_iocs.contains(&sha256_hex) {
+                println!("SHA256 MATCH");
+                matches +=1;
+            }
+
+            match matches {
+                0 => println!("VERDICT: NO MATCH"),
+                1 => println!("VERDICT: PARTIAL MATCH"),
+                _ => println!("VERDICT: CONFIRMED MATCH"),
             }
         }
 
