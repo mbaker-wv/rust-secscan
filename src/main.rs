@@ -1,10 +1,43 @@
-use std::env; // Access to command-line arguments and environment info
-use std::fs;  // Access to filesystem functions (read files)
+use std::env; // Command-line arguments
+use std::fs;  // File system access
 use std::collections::HashSet;
-use sha2::{Digest,Sha256};
+
+use sha2::{Digest, Sha256};
 use sha1::Sha1;
 use md5::Md5;
 
+use serde::Serialize;
+
+// ----------------------------
+// Data structures for JSON output
+// ----------------------------
+
+#[derive(Serialize)]
+struct Hashes {
+    md5: String,
+    sha1: String,
+    sha256: String,
+}
+
+#[derive(Serialize)]
+struct Matches {
+    md5: bool,
+    sha1: bool,
+    sha256: bool,
+}
+
+#[derive(Serialize)]
+struct ScanResult {
+    file: String,
+    size: usize,
+    hashes: Hashes,
+    matches: Matches,
+    verdict: String,
+}
+
+// ----------------------------
+// Helper functions
+// ----------------------------
 
 fn hash_file(bytes: &[u8]) -> (String, String, String) {
     // MD5
@@ -12,21 +45,20 @@ fn hash_file(bytes: &[u8]) -> (String, String, String) {
     md5_hasher.update(bytes);
     let md5_hex = hex::encode(md5_hasher.finalize());
 
-    //SHA1
+    // SHA1
     let mut sha1_hasher = Sha1::new();
     sha1_hasher.update(bytes);
     let sha1_hex = hex::encode(sha1_hasher.finalize());
 
-    //Sha256
+    // SHA256
     let mut sha256_hasher = Sha256::new();
     sha256_hasher.update(bytes);
     let sha256_hex = hex::encode(sha256_hasher.finalize());
 
     (md5_hex, sha1_hex, sha256_hex)
-
 }
 
-fn load_iocs(path: &str) -> (HashSet<String>, HashSet<String>,HashSet<String>) {
+fn load_iocs(path: &str) -> (HashSet<String>, HashSet<String>, HashSet<String>) {
     let contents = match fs::read_to_string(path) {
         Ok(data) => data,
         Err(err) => {
@@ -45,7 +77,7 @@ fn load_iocs(path: &str) -> (HashSet<String>, HashSet<String>,HashSet<String>) {
                 "md5" => { md5_iocs.insert(value.to_string()); }
                 "sha1" => { sha1_iocs.insert(value.to_string()); }
                 "sha256" => { sha256_iocs.insert(value.to_string()); }
-                _=> {}
+                _ => {}
             }
         }
     }
@@ -53,91 +85,72 @@ fn load_iocs(path: &str) -> (HashSet<String>, HashSet<String>,HashSet<String>) {
     (md5_iocs, sha1_iocs, sha256_iocs)
 }
 
-
-
+// ----------------------------
+// Main
+// ----------------------------
 
 fn main() {
-    // I collect all command-line arguments into a vector (list)
     let args: Vec<String> = env::args().collect();
 
-    // args[0] -> program name
-    // args[1] -> mode ("scan")
-    // args[2] -> file path
     if args.len() < 3 {
         println!("Usage: rust_secscan scan <file_path>");
-        return; // Stop the execution safely
+        return;
     }
 
-    // I borrow with (&) instead of copying — efficient and safe
     let mode = &args[1];
-
-    // I borrow the file path argument
     let file_path = &args[2];
 
-    // Anything else is rejected explicitly at this time
     if mode != "scan" {
         println!("Unsupported mode: {}", mode);
         return;
     }
 
-    // Load IOC File
+    // Load IOC lists
     let (md5_iocs, sha1_iocs, sha256_iocs) = load_iocs("iocs.txt");
 
-    // I attempt to read the file as RAW BYTES
-    // Ok(Vec<u8>)  -> file read successfully
-    // Err(error)   -> something went wrong
+    // Read target file as raw bytes
     match fs::read(file_path) {
         Ok(bytes) => {
-            // The bytes is a Vec<u8> — raw data from disk
-            println!("File opened successfully");
-
-            if bytes.len() == 0 {
+            if bytes.is_empty() {
                 println!("File is empty - no hash computed");
                 return;
             }
-            
-            // prints the file size in bytes
-            println!("File size: {} bytes", bytes.len());
 
             let (md5_hex, sha1_hex, sha256_hex) = hash_file(&bytes);
 
-            // Prints the Hash values of the file
-            println!("MD5:    {}",md5_hex);
-            println!("SHA1:   {}",sha1_hex);
-            println!("SHA256: {}", sha256_hex);
+            let md5_match = md5_iocs.contains(&md5_hex);
+            let sha1_match = sha1_iocs.contains(&sha1_hex);
+            let sha256_match = sha256_iocs.contains(&sha256_hex);
 
-            // prints new line and then prompts for IOC compare check
-            println!();
-            println!("IOC Comparison");
+            let match_count =
+                md5_match as u8 + sha1_match as u8 + sha256_match as u8;
 
-            // sets the varable and assigns it to 0 but also notes it will change
-            let mut matches = 0;
+            let verdict = match match_count {
+                0 => "NO_MATCH",
+                1 => "PARTIAL_MATCH",
+                _ => "CONFIRMED_MATCH",
+            }.to_string();
 
-            // these if statments are use to matche anything in the IOC list, it will print message
-            if md5_iocs.contains(&md5_hex) {
-                println!("MD5 MATCH");
-                matches +=1;
-            }
+            let result = ScanResult {
+                file: file_path.to_string(),
+                size: bytes.len(),
+                hashes: Hashes {
+                    md5: md5_hex,
+                    sha1: sha1_hex,
+                    sha256: sha256_hex,
+                },
+                matches: Matches {
+                    md5: md5_match,
+                    sha1: sha1_match,
+                    sha256: sha256_match,
+                },
+                verdict,
+            };
 
-            if sha1_iocs.contains(&sha1_hex) {
-                println!("SHA1 MATCH");
-                matches +=1;
-            }
-
-            if sha256_iocs.contains(&sha256_hex) {
-                println!("SHA256 MATCH");
-                matches +=1;
-            }
-
-            // assigns a confidence level to the match, 0=nothing suspicious, 1=suspicious, 2=high confidence
-            match matches {
-                0 => println!("VERDICT: NO MATCH"),
-                1 => println!("VERDICT: PARTIAL MATCH"),
-                _ => println!("VERDICT: CONFIRMED MATCH"),
-            }
+            let json = serde_json::to_string_pretty(&result).unwrap();
+            println!("{}", json);
         }
 
-        // if no file present or error, then prompts message
         Err(error) => {
             println!("Failed to open file: {}", error);
         }
