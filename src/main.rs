@@ -1,6 +1,7 @@
-use std::env; // Command-line arguments
-use std::fs;  // File system access
+use std::env;
+use std::fs;
 use std::collections::HashSet;
+use std::process;
 
 use sha2::{Digest, Sha256};
 use sha1::Sha1;
@@ -9,7 +10,7 @@ use md5::Md5;
 use serde::Serialize;
 
 // ----------------------------
-// Data structures for JSON output
+// Data structures
 // ----------------------------
 
 #[derive(Serialize)]
@@ -40,17 +41,14 @@ struct ScanResult {
 // ----------------------------
 
 fn hash_file(bytes: &[u8]) -> (String, String, String) {
-    // MD5
     let mut md5_hasher = Md5::new();
     md5_hasher.update(bytes);
     let md5_hex = hex::encode(md5_hasher.finalize());
 
-    // SHA1
     let mut sha1_hasher = Sha1::new();
     sha1_hasher.update(bytes);
     let sha1_hex = hex::encode(sha1_hasher.finalize());
 
-    // SHA256
     let mut sha256_hasher = Sha256::new();
     sha256_hasher.update(bytes);
     let sha256_hex = hex::encode(sha256_hasher.finalize());
@@ -85,74 +83,130 @@ fn load_iocs(path: &str) -> (HashSet<String>, HashSet<String>, HashSet<String>) 
     (md5_iocs, sha1_iocs, sha256_iocs)
 }
 
+fn determine_verdict(md5: bool, sha1: bool, sha256: bool) -> String {
+    let match_count = md5 as u8 + sha1 as u8 + sha256 as u8;
+
+    match match_count {
+        0 => "NO_MATCH".to_string(),
+        1 => "PARTIAL_MATCH".to_string(),
+        _ => "CONFIRMED_MATCH".to_string(),
+    }
+}
+
+fn verdict_exit_code(verdict: &str) -> i32 {
+    match verdict {
+        "NO_MATCH" => 0,
+        "PARTIAL_MATCH" => 1,
+        "CONFIRMED_MATCH" => 2,
+        _ => 3,
+    }
+}
+
+fn scan_file(
+    file_path: &str,
+    bytes: &[u8],
+    md5_iocs: &HashSet<String>,
+    sha1_iocs: &HashSet<String>,
+    sha256_iocs: &HashSet<String>,
+) -> ScanResult {
+    let (md5_hex, sha1_hex, sha256_hex) = hash_file(bytes);
+
+    let md5_match = md5_iocs.contains(&md5_hex);
+    let sha1_match = sha1_iocs.contains(&sha1_hex);
+    let sha256_match = sha256_iocs.contains(&sha256_hex);
+
+    let verdict = determine_verdict(md5_match, sha1_match, sha256_match);
+
+    ScanResult {
+        file: file_path.to_string(),
+        size: bytes.len(),
+        hashes: Hashes {
+            md5: md5_hex,
+            sha1: sha1_hex,
+            sha256: sha256_hex,
+        },
+        matches: Matches {
+            md5: md5_match,
+            sha1: sha1_match,
+            sha256: sha256_match,
+        },
+        verdict,
+    }
+}
+
 // ----------------------------
-// Main
+// Main (SOC-style orchestration)
 // ----------------------------
 
 fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 3 {
-        println!("Usage: rust_secscan scan <file_path>");
-        return;
+        println!("Usage: rust-secscan scan <file1> [file2 ...] [--json]");
+        process::exit(3);
     }
 
     let mode = &args[1];
-    let file_path = &args[2];
-
     if mode != "scan" {
         println!("Unsupported mode: {}", mode);
-        return;
+        process::exit(3);
     }
 
-    // Load IOC lists
+    let json_output = args.contains(&"--json".to_string());
+
+    let file_paths: Vec<&String> = args[2..]
+        .iter()
+        .filter(|arg| !arg.starts_with("--"))
+        .collect();
+
+    if file_paths.is_empty() {
+        println!("No files specified.");
+        process::exit(3);
+    }
+
     let (md5_iocs, sha1_iocs, sha256_iocs) = load_iocs("iocs.txt");
 
-    // Read target file as raw bytes
-    match fs::read(file_path) {
-        Ok(bytes) => {
-            if bytes.is_empty() {
-                println!("File is empty - no hash computed");
-                return;
+    let mut highest_exit = 0;
+
+    for file_path in file_paths {
+        match fs::read(file_path) {
+            Ok(bytes) => {
+                if bytes.is_empty() {
+                    continue;
+                }
+
+                let result = scan_file(
+                    file_path,
+                    &bytes,
+                    &md5_iocs,
+                    &sha1_iocs,
+                    &sha256_iocs,
+                );
+
+                let exit_code = verdict_exit_code(&result.verdict);
+                highest_exit = highest_exit.max(exit_code);
+
+                if json_output {
+                    let json = serde_json::to_string_pretty(&result).unwrap();
+                    println!("{}", json);
+                } else {
+                    println!("File: {}", result.file);
+                    println!("Size: {} bytes", result.size);
+                    println!("MD5: {}", result.hashes.md5);
+                    println!("SHA1: {}", result.hashes.sha1);
+                    println!("SHA256: {}", result.hashes.sha256);
+                    println!("Verdict: {}", result.verdict);
+                    println!();
+                }
             }
 
-            let (md5_hex, sha1_hex, sha256_hex) = hash_file(&bytes);
-
-            let md5_match = md5_iocs.contains(&md5_hex);
-            let sha1_match = sha1_iocs.contains(&sha1_hex);
-            let sha256_match = sha256_iocs.contains(&sha256_hex);
-
-            let match_count =
-                md5_match as u8 + sha1_match as u8 + sha256_match as u8;
-
-            let verdict = match match_count {
-                0 => "NO_MATCH",
-                1 => "PARTIAL_MATCH",
-                _ => "CONFIRMED_MATCH",
-            }.to_string();
-
-            let result = ScanResult {
-                file: file_path.to_string(),
-                size: bytes.len(),
-                hashes: Hashes {
-                    md5: md5_hex,
-                    sha1: sha1_hex,
-                    sha256: sha256_hex,
-                },
-                matches: Matches {
-                    md5: md5_match,
-                    sha1: sha1_match,
-                    sha256: sha256_match,
-                },
-                verdict,
-            };
-
-            let json = serde_json::to_string_pretty(&result).unwrap();
-            println!("{}", json);
-        }
-
-        Err(error) => {
-            println!("Failed to open file: {}", error);
+            Err(err) => {
+                println!("Failed to open {}: {}", file_path, err);
+                highest_exit = highest_exit.max(3);
+            }
         }
     }
+
+    process::exit(highest_exit);
 }
+
