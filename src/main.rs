@@ -135,7 +135,7 @@ fn scan_file(
 }
 
 // ----------------------------
-// Main (SOC-style orchestration)
+// Main
 // ----------------------------
 
 fn main() {
